@@ -1,172 +1,139 @@
+# ===============================
+# Sector Rotation Final App
+# ===============================
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# =========================================================
+# -------------------------------
 # 기본 설정
-# =========================================================
-st.set_page_config(page_title="KR Sector Rotation FINAL", layout="wide")
-st.title("🇰🇷 한국시장 섹터 로테이션 – 최종판 v1.0")
+# -------------------------------
+st.set_page_config(page_title="Sector Rotation Dashboard", layout="wide")
+st.title("📊 Sector Rotation Dashboard (Final)")
 
 START_DATE = "2018-01-01"
 
-# =========================================================
-# 한국 섹터 ETF (안정적인 KODEX 위주)
-# =========================================================
-SECTORS = {
-    "반도체": "091160",
-    "2차전지": "305720",
-    "바이오": "244580",
-    "자동차": "091180",
-    "인터넷": "266360",
+# 한국 + 글로벌 섹터 ETF (안정성 위주)
+SECTOR_ETF = {
+    "반도체": "SOXX",
+    "인터넷": "FDN",
+    "AI": "BOTZ",
+    "바이오": "IBB",
+    "에너지": "XLE",
+    "2차전지": "LIT"
 }
 
-# =========================================================
-# 데이터 로드 (완전 방어)
-# =========================================================
+# -------------------------------
+# 데이터 로드
+# -------------------------------
 @st.cache_data
-def load_price(code):
-    try:
-        ticker = f"{code}.KS"
-        df = yf.download(ticker, start=START_DATE, progress=False)
-        if df is None or df.empty:
-            return None
-        df = df[["Close"]].dropna()
-        return df
-    except Exception:
-        return None
+def load_price(ticker):
+    df = yf.download(ticker, start=START_DATE, progress=False)
+    df = df[["Close"]].dropna()
+    return df
 
-# =========================================================
-# 섹터 모멘텀 점수 (최종 확정 로직)
-# =========================================================
-def sector_score(df):
-    if df is None or len(df) < 130:
+# -------------------------------
+# 1️⃣ 섹터 모멘텀 점수 계산
+# -------------------------------
+def momentum_score(df):
+    df = df.copy()
+
+    if len(df) < 150:
         return 0
 
-    close = df["Close"]
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma60"] = df["Close"].rolling(60).mean()
+    df["ma120"] = df["Close"].rolling(120).mean()
 
-    try:
-        ret_3m = float(close.pct_change(63).iloc[-1])
-        ret_6m = float(close.pct_change(126).iloc[-1])
-        ma120 = float(close.rolling(120).mean().iloc[-1])
-        last = float(close.iloc[-1])
-        vol_now = float(close.pct_change().rolling(60).std().iloc[-1])
-        vol_avg = float(close.pct_change().rolling(60).std().mean())
-    except Exception:
-        return 0
+    last = df.iloc[-1]
 
     score = 0
-    if ret_3m > 0: score += 3
-    if ret_6m > 0: score += 3
-    if last > ma120: score += 2
-    if vol_now < vol_avg: score += 2
+    if last["Close"] > last["ma20"]:
+        score += 1
+    if last["Close"] > last["ma60"]:
+        score += 1
+    if last["Close"] > last["ma120"]:
+        score += 1
+
+    ret_3m = df["Close"].pct_change(63).iloc[-1]
+    ret_6m = df["Close"].pct_change(126).iloc[-1]
+
+    if ret_3m > 0:
+        score += 2
+    if ret_6m > 0:
+        score += 3
 
     return int(score)
 
-def signal(score):
-    if score >= 8:
-        return "🔥 강세"
-    elif score >= 5:
-        return "👀 관찰"
-    else:
-        return "❌ 약세"
-
-# =========================================================
-# 데이터 준비
-# =========================================================
+# -------------------------------
+# 섹터별 점수 계산
+# -------------------------------
+scores = {}
 price_data = {}
-result = []
 
-for sector, code in SECTORS.items():
-    df = load_price(code)
+for sector, ticker in SECTOR_ETF.items():
+    df = load_price(ticker)
     price_data[sector] = df
-    sc = sector_score(df)
-    result.append({
-        "섹터": sector,
-        "모멘텀 점수": sc,
-        "시그널": signal(sc)
-    })
+    scores[sector] = momentum_score(df)
 
 score_df = (
-    pd.DataFrame(result)
-    .sort_values("모멘텀 점수", ascending=False)
-    .reset_index(drop=True)
+    pd.DataFrame.from_dict(scores, orient="index", columns=["Momentum Score"])
+    .sort_values("Momentum Score", ascending=False)
 )
 
-# =========================================================
-# 1️⃣ 섹터 점수 테이블
-# =========================================================
-st.subheader("① 섹터 모멘텀 점수")
-st.dataframe(score_df, use_container_width=True)
-
-# =========================================================
-# 2️⃣ 섹터 점수 차트
-# =========================================================
-st.subheader("② 섹터 모멘텀 비교")
+# -------------------------------
+# 1️⃣ 섹터 모멘텀 점수 차트
+# -------------------------------
+st.header("① 섹터 모멘텀 점수 비교")
 
 fig1, ax1 = plt.subplots()
-ax1.bar(score_df["섹터"], score_df["모멘텀 점수"])
-ax1.set_ylim(0, 10)
+score_df["Momentum Score"].plot(kind="bar", ax=ax1)
 ax1.set_ylabel("Score")
+ax1.set_title("Sector Momentum Score")
 st.pyplot(fig1)
 
-# =========================================================
-# 3️⃣ 섹터 가격 추이
-# =========================================================
-st.subheader("③ 섹터 가격 추이")
+st.dataframe(score_df)
 
-selected = st.selectbox("섹터 선택", score_df["섹터"].tolist())
-df_sel = price_data[selected]
+# -------------------------------
+# 2️⃣ 섹터 가격 추이
+# -------------------------------
+st.header("② 섹터 가격 추이 확인")
 
-if df_sel is not None:
-    fig2, ax2 = plt.subplots()
-    ax2.plot(df_sel.index, df_sel["Close"])
-    ax2.set_title(f"{selected} 가격")
-    st.pyplot(fig2)
-else:
-    st.warning("가격 데이터 없음")
+selected_sector = st.selectbox("섹터 선택", list(SECTOR_ETF.keys()))
+df_price = price_data[selected_sector]
 
-# =========================================================
-# 4️⃣ 월별 섹터 로테이션 백테스트
-# =========================================================
-st.subheader("④ 월별 섹터 로테이션 백테스트 (Top 1)")
+fig2, ax2 = plt.subplots()
+ax2.plot(df_price.index, df_price["Close"], label="Close Price")
+ax2.set_title(f"{selected_sector} 가격 추이")
+ax2.legend()
+st.pyplot(fig2)
 
-dates = pd.date_range("2019-01-01", pd.Timestamp.today(), freq="M")
-monthly_returns = []
+# -------------------------------
+# 3️⃣ 월별 로테이션 백테스트
+# -------------------------------
+st.header("③ 월별 섹터 로테이션 백테스트")
 
-for d in dates:
-    scores = {}
-    for sector, df in price_data.items():
-        if df is None or df.index[-1] < d:
-            continue
-        scores[sector] = sector_score(df[df.index <= d])
+monthly_returns = {}
 
-    if not scores:
-        monthly_returns.append(0)
-        continue
+for sector, df in price_data.items():
+    monthly = df["Close"].resample("M").last().pct_change()
+    monthly_returns[sector] = monthly
 
-    best = max(scores, key=scores.get)
-    df_best = price_data[best]
-    m = df_best[(df_best.index > d - pd.DateOffset(months=1)) & (df_best.index <= d)]
+monthly_df = pd.DataFrame(monthly_returns)
 
-    if len(m) < 2:
-        monthly_returns.append(0)
-    else:
-        monthly_returns.append(float(m["Close"].pct_change().iloc[-1]))
+# 매달 가장 강한 섹터 선택
+best_sector_each_month = monthly_df.idxmax(axis=1)
+strategy_return = monthly_df.lookup(monthly_df.index, best_sector_each_month)
 
-bt = pd.Series(monthly_returns, index=dates).fillna(0)
-equity = (1 + bt).cumprod()
-
-years = len(equity) / 12
-cagr = equity.iloc[-1] ** (1 / years) - 1 if years > 0 else 0
-mdd = (equity / equity.cummax() - 1).min()
-
-st.write(f"📈 CAGR: **{cagr*100:.2f}%**")
-st.write(f"📉 MDD: **{mdd*100:.2f}%**")
+strategy_cum = (1 + strategy_return.fillna(0)).cumprod()
 
 fig3, ax3 = plt.subplots()
-ax3.plot(equity.index, equity.values)
-ax3.set_title("전략 누적 수익률")
+ax3.plot(strategy_cum.index, strategy_cum, label="Rotation Strategy", linewidth=2)
+ax3.set_title("월별 섹터 로테이션 누적 수익")
+ax3.legend()
 st.pyplot(fig3)
+
+st.success("✅ 최종 버전 실행 완료 (모멘텀 → 확인 → 검증)")
