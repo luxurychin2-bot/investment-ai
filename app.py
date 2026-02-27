@@ -1,57 +1,125 @@
 import streamlit as st
-import numpy as np
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="김동진 투자 AI", layout="wide")
+# ======================
+# 기본 설정
+# ======================
+st.set_page_config(page_title="Sector Rotation Dashboard", layout="wide")
+st.title("📊 Sector Rotation Dashboard")
 
-st.title("📊 김동진 전용 투자 AI 대시보드")
+START = "2018-01-01"
 
-menu = st.sidebar.selectbox("메뉴 선택", ["DCF 계산기", "기업 점수 계산기"])
+SECTOR_ETF = {
+    "AI": "BOTZ",
+    "BIO": "IBB",
+    "SEMICON": "SOXX",
+    "ENERGY": "XLE",
+    "DEFENSE": "ITA"
+}
 
-if menu == "DCF 계산기":
+# ======================
+# 데이터 로딩 (완전 방어)
+# ======================
+@st.cache_data
+def load_price(ticker):
+    try:
+        df = yf.download(ticker, start=START, progress=False)
+        if df is None or df.empty:
+            return None
+        df = df[["Close"]].dropna()
+        return df
+    except Exception:
+        return None
 
-    st.header("📈 DCF 목표가 계산")
+# ======================
+# 점수 계산 (Series 비교 에러 완전 차단)
+# ======================
+def calculate_score(df):
+    if df is None or len(df) < 130:
+        return 0
 
-    eps = st.number_input("현재 EPS", value=3000)
-    growth = st.number_input("연 성장률 (%)", value=10)
-    discount = st.number_input("할인율 (%)", value=8)
-    current_price = st.number_input("현재 주가", value=60000)
+    df = df.copy()
+    df["ma20"] = df["Close"].rolling(20).mean()
+    df["ma60"] = df["Close"].rolling(60).mean()
+    df["ma120"] = df["Close"].rolling(120).mean()
 
-    years = 10
+    last = df.iloc[-1]
 
-    future_eps = eps * ((1 + growth/100) ** years)
-    fair_price = future_eps / ((1 + discount/100) ** years)
+    # ❗ 무조건 float로 변환 (핵심)
+    try:
+        close = float(last["Close"])
+        ma20 = float(last["ma20"])
+        ma60 = float(last["ma60"])
+        ma120 = float(last["ma120"])
+    except Exception:
+        return 0
 
-    gap = ((fair_price - current_price) / current_price) * 100
+    score = 0
+    if close > ma20:
+        score += 1
+    if ma20 > ma60:
+        score += 1
+    if ma60 > ma120:
+        score += 1
 
-    st.subheader("📊 결과")
+    return score
 
-    st.write(f"10년 후 예상 EPS: {round(future_eps,2)}")
-    st.write(f"내재 가치: {round(fair_price,2)} 원")
-    st.write(f"저평가/고평가: {round(gap,2)} %")
+# ======================
+# 섹터 점수 계산
+# ======================
+scores = {}
+price_data = {}
 
-    if gap > 20:
-        st.success("💎 저평가 가능성 높음")
-    elif gap < -20:
-        st.error("⚠ 고평가 가능성 있음")
-    else:
-        st.info("중립 구간")
+for sector, ticker in SECTOR_ETF.items():
+    df = load_price(ticker)
+    price_data[sector] = df
+    scores[sector] = calculate_score(df)
 
-elif menu == "기업 점수 계산기":
+score_df = pd.DataFrame(
+    [{"Sector": k, "Score": int(v)} for k, v in scores.items()]
+)
 
-    st.header("📊 재무 점수 계산")
+# ❗ 숫자 없을 경우 차트 에러 방지
+if score_df.empty or score_df["Score"].sum() == 0:
+    st.warning("⚠️ 현재 계산 가능한 데이터가 없습니다.")
+    st.stop()
 
-    roe = st.slider("ROE (%)", 0, 50, 15)
-    debt = st.slider("부채비율 (%)", 0, 300, 100)
-    growth = st.slider("매출 성장률 (%)", -20, 50, 10)
+score_df = score_df.sort_values("Score", ascending=False).reset_index(drop=True)
 
-    score = (roe * 0.4) + ((200 - debt) * 0.3) + (growth * 0.3)
+# ======================
+# 상위 섹터
+# ======================
+st.subheader("🔥 이번 달 상위 섹터")
+for i in range(min(2, len(score_df))):
+    st.write(f"• **{score_df.loc[i,'Sector']}** | 점수: {score_df.loc[i,'Score']}")
 
-    st.subheader("📈 종합 점수")
-    st.write(f"기업 점수: {round(score,1)}")
+# ======================
+# 섹터 점수 차트 (numeric 보장)
+# ======================
+st.subheader("📊 섹터별 모멘텀 점수")
 
-    if score > 80:
-        st.success("🔥 매우 우수")
-    elif score > 60:
-        st.info("👍 양호")
-    else:
-        st.warning("⚠ 개선 필요")
+fig, ax = plt.subplots()
+ax.bar(score_df["Sector"], score_df["Score"])
+ax.set_ylim(0, 3)
+ax.set_ylabel("Score")
+
+st.pyplot(fig)
+
+# ======================
+# 개별 섹터 가격 차트
+# ======================
+st.subheader("📈 섹터 가격 추이")
+
+selected = st.selectbox("섹터 선택", score_df["Sector"].tolist())
+df_sel = price_data.get(selected)
+
+if df_sel is not None and not df_sel.empty:
+    fig2, ax2 = plt.subplots()
+    ax2.plot(df_sel.index, df_sel["Close"])
+    ax2.set_title(f"{selected} Price")
+    st.pyplot(fig2)
+else:
+    st.warning("가격 데이터를 불러올 수 없습니다.")
+     
