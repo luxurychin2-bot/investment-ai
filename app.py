@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
 # ======================
@@ -20,7 +21,7 @@ SECTOR_ETF = {
 }
 
 # ======================
-# 데이터 로딩 (완전 방어)
+# 데이터 로딩
 # ======================
 @st.cache_data
 def load_price(ticker):
@@ -34,7 +35,7 @@ def load_price(ticker):
         return None
 
 # ======================
-# 점수 계산 (Series 비교 에러 완전 차단)
+# 모멘텀 점수
 # ======================
 def calculate_score(df):
     if df is None or len(df) < 130:
@@ -47,7 +48,6 @@ def calculate_score(df):
 
     last = df.iloc[-1]
 
-    # ❗ 무조건 float로 변환 (핵심)
     try:
         close = float(last["Close"])
         ma20 = float(last["ma20"])
@@ -57,20 +57,56 @@ def calculate_score(df):
         return 0
 
     score = 0
-    if close > ma20:
-        score += 1
-    if ma20 > ma60:
-        score += 1
-    if ma60 > ma120:
-        score += 1
+    if close > ma20: score += 1
+    if ma20 > ma60: score += 1
+    if ma60 > ma120: score += 1
 
     return score
 
 # ======================
-# 섹터 점수 계산
+# 월별 섹터 로테이션 백테스트
 # ======================
-scores = {}
+def sector_rotation_backtest(price_dict):
+    monthly_returns = []
+
+    # 월말 기준
+    dates = pd.date_range(start=START, end=pd.Timestamp.today(), freq="M")
+
+    for date in dates:
+        scores = {}
+
+        for sector, df in price_dict.items():
+            if df is None or df.index[-1] < date:
+                continue
+
+            sub = df[df.index <= date]
+            scores[sector] = calculate_score(sub)
+
+        if not scores:
+            monthly_returns.append(0)
+            continue
+
+        best_sector = max(scores, key=scores.get)
+        df_best = price_dict[best_sector]
+
+        month_data = df_best[
+            (df_best.index > date - pd.DateOffset(months=1)) &
+            (df_best.index <= date)
+        ]
+
+        if len(month_data) < 2:
+            monthly_returns.append(0)
+        else:
+            ret = month_data["Close"].pct_change().iloc[-1]
+            monthly_returns.append(float(ret))
+
+    return pd.Series(monthly_returns, index=dates).fillna(0)
+
+# ======================
+# 데이터 준비
+# ======================
 price_data = {}
+scores = {}
 
 for sector, ticker in SECTOR_ETF.items():
     df = load_price(ticker)
@@ -78,48 +114,56 @@ for sector, ticker in SECTOR_ETF.items():
     scores[sector] = calculate_score(df)
 
 score_df = pd.DataFrame(
-    [{"Sector": k, "Score": int(v)} for k, v in scores.items()]
-)
-
-# ❗ 숫자 없을 경우 차트 에러 방지
-if score_df.empty or score_df["Score"].sum() == 0:
-    st.warning("⚠️ 현재 계산 가능한 데이터가 없습니다.")
-    st.stop()
-
-score_df = score_df.sort_values("Score", ascending=False).reset_index(drop=True)
+    [{"Sector": k, "Score": v} for k, v in scores.items()]
+).sort_values("Score", ascending=False)
 
 # ======================
 # 상위 섹터
 # ======================
 st.subheader("🔥 이번 달 상위 섹터")
-for i in range(min(2, len(score_df))):
-    st.write(f"• **{score_df.loc[i,'Sector']}** | 점수: {score_df.loc[i,'Score']}")
+for _, row in score_df.head(2).iterrows():
+    st.write(f"• **{row['Sector']}** | 점수: {row['Score']}")
 
 # ======================
-# 섹터 점수 차트 (numeric 보장)
+# 섹터 점수 차트
 # ======================
-st.subheader("📊 섹터별 모멘텀 점수")
+st.subheader("📊 섹터 모멘텀 점수")
 
 fig, ax = plt.subplots()
 ax.bar(score_df["Sector"], score_df["Score"])
 ax.set_ylim(0, 3)
-ax.set_ylabel("Score")
-
 st.pyplot(fig)
 
 # ======================
-# 개별 섹터 가격 차트
+# 섹터 가격 차트
 # ======================
 st.subheader("📈 섹터 가격 추이")
 
 selected = st.selectbox("섹터 선택", score_df["Sector"].tolist())
-df_sel = price_data.get(selected)
+df_sel = price_data[selected]
 
-if df_sel is not None and not df_sel.empty:
+if df_sel is not None:
     fig2, ax2 = plt.subplots()
     ax2.plot(df_sel.index, df_sel["Close"])
-    ax2.set_title(f"{selected} Price")
     st.pyplot(fig2)
-else:
-    st.warning("가격 데이터를 불러올 수 없습니다.")
-     
+
+# ======================
+# 백테스트 결과
+# ======================
+st.subheader("📅 월별 섹터 로테이션 백테스트")
+
+bt = sector_rotation_backtest(price_data)
+cum = (1 + bt).cumprod()
+
+# CAGR / MDD
+years = len(cum) / 12
+cagr = cum.iloc[-1] ** (1 / years) - 1
+mdd = (cum / cum.cummax() - 1).min()
+
+st.write(f"📈 CAGR: **{cagr*100:.2f}%**")
+st.write(f"📉 MDD: **{mdd*100:.2f}%**")
+
+fig3, ax3 = plt.subplots()
+ax3.plot(cum.index, cum.values)
+ax3.set_title("Strategy Cumulative Return")
+st.pyplot(fig3)
