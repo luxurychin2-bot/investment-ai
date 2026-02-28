@@ -1,145 +1,129 @@
-# ===============================
-# Sector Rotation Dashboard FINAL (Stable)
-# ===============================
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# -------------------------------
-# 기본 설정
-# -------------------------------
 st.set_page_config(page_title="Sector Rotation Dashboard", layout="wide")
-st.title("📊 Sector Rotation Dashboard (Final Stable Version)")
+
+# -----------------------------
+# 섹터 ETF (한국 컨셉, 미국 ETF 대용)
+# -----------------------------
+SECTORS = {
+    "AI": "BOTZ",
+    "반도체": "SOXX",
+    "2차전지": "LIT",
+    "바이오": "IBB",
+    "에너지": "XLE",
+    "인터넷": "FDN"
+}
 
 START_DATE = "2018-01-01"
 
-SECTOR_ETF = {
-    "반도체": "SOXX",
-    "인터넷": "FDN",
-    "AI": "BOTZ",
-    "바이오": "IBB",
-    "에너지": "XLE",
-    "2차전지": "LIT"
-}
-
-# -------------------------------
-# 데이터 로드
-# -------------------------------
+# -----------------------------
+# 데이터 로드 (안전)
+# -----------------------------
 @st.cache_data
 def load_price(ticker):
     df = yf.download(ticker, start=START_DATE, progress=False)
     df = df[["Close"]].dropna()
-    df["Close"] = df["Close"].astype(float)  # 🔒 핵심
     return df
 
-# -------------------------------
-# 1️⃣ 모멘텀 점수
-# -------------------------------
+# -----------------------------
+# 모멘텀 점수 (절대값만 비교, Series 비교 금지)
+# -----------------------------
 def momentum_score(df):
-    if len(df) < 150:
+    score = 0
+    if len(df) < 130:
         return 0
 
-    df = df.copy()
-    df["ma20"] = df["Close"].rolling(20).mean()
-    df["ma60"] = df["Close"].rolling(60).mean()
-    df["ma120"] = df["Close"].rolling(120).mean()
+    ret_1m = df["Close"].pct_change(21).iloc[-1]
+    ret_3m = df["Close"].pct_change(63).iloc[-1]
+    ret_6m = df["Close"].pct_change(126).iloc[-1]
 
-    close = float(df["Close"].iloc[-1])
-    ma20 = float(df["ma20"].iloc[-1])
-    ma60 = float(df["ma60"].iloc[-1])
-    ma120 = float(df["ma120"].iloc[-1])
-
-    score = 0
-    if close > ma20:
-        score += 1
-    if close > ma60:
-        score += 1
-    if close > ma120:
-        score += 1
-
-    ret_3m = float(df["Close"].pct_change(63).iloc[-1])
-    ret_6m = float(df["Close"].pct_change(126).iloc[-1])
-
-    if ret_3m > 0:
-        score += 2
-    if ret_6m > 0:
-        score += 3
+    for r in [ret_1m, ret_3m, ret_6m]:
+        if r > 0:
+            score += 1
 
     return score
 
-# -------------------------------
-# 섹터 점수 계산
-# -------------------------------
-price_data = {}
-scores = {}
+# =============================
+# ① 섹터 모멘텀 점수
+# =============================
+st.title("📊 Sector Rotation Dashboard")
 
-for sector, ticker in SECTOR_ETF.items():
+scores = {}
+prices = {}
+
+for sector, ticker in SECTORS.items():
     df = load_price(ticker)
-    price_data[sector] = df
+    prices[sector] = df
     scores[sector] = momentum_score(df)
 
-score_df = (
-    pd.DataFrame.from_dict(scores, orient="index", columns=["Momentum Score"])
-    .sort_values("Momentum Score", ascending=False)
-)
+score_df = pd.DataFrame.from_dict(scores, orient="index", columns=["Momentum Score"])
+score_df = score_df.sort_values("Momentum Score", ascending=False)
 
-# -------------------------------
-# ① 섹터 모멘텀 점수
-# -------------------------------
 st.header("① 섹터 모멘텀 점수")
+st.dataframe(score_df, use_container_width=True)
 
 fig1, ax1 = plt.subplots()
 score_df["Momentum Score"].plot(kind="bar", ax=ax1)
 ax1.set_ylabel("Score")
-ax1.set_title("Sector Momentum Score")
 st.pyplot(fig1)
 
-st.dataframe(score_df)
-
-# -------------------------------
+# =============================
 # ② 섹터 가격 추이
-# -------------------------------
+# =============================
 st.header("② 섹터 가격 추이")
+selected_sector = st.selectbox("섹터 선택", list(SECTORS.keys()))
 
-selected_sector = st.selectbox("섹터 선택", list(SECTOR_ETF.keys()))
-df_price = price_data[selected_sector]
+price_df = prices[selected_sector].copy()
+price_df["MA20"] = price_df["Close"].rolling(20).mean()
+price_df["MA60"] = price_df["Close"].rolling(60).mean()
 
 fig2, ax2 = plt.subplots()
-ax2.plot(df_price.index, df_price["Close"])
+ax2.plot(price_df.index, price_df["Close"], label="Close")
+ax2.plot(price_df.index, price_df["MA20"], label="MA20")
+ax2.plot(price_df.index, price_df["MA60"], label="MA60")
+ax2.legend()
 ax2.set_title(f"{selected_sector} 가격 추이")
+
 st.pyplot(fig2)
 
-# -------------------------------
-# ③ 월별 로테이션 백테스트
-# -------------------------------
+# =============================
+# ③ 월별 섹터 로테이션 백테스트
+# =============================
 st.header("③ 월별 섹터 로테이션 백테스트")
 
 monthly_returns = pd.DataFrame()
 
-for sector, df in price_data.items():
-    monthly_returns[sector] = (
-        df["Close"]
-        .resample("M")
-        .last()
-        .pct_change()
-    )
+for sector, df in prices.items():
+    monthly = df["Close"].resample("M").last().pct_change()
+    monthly_returns[sector] = monthly
 
-best_sector = monthly_returns.idxmax(axis=1)
+monthly_returns = monthly_returns.dropna()
 
-strategy_return = []
+strategy_returns = []
+
 for date in monthly_returns.index:
-    sector = best_sector.loc[date]
-    strategy_return.append(monthly_returns.loc[date, sector])
+    row = monthly_returns.loc[date]
+    best_sector = row.idxmax()
+    strategy_returns.append(row[best_sector])
 
-strategy_return = pd.Series(strategy_return, index=monthly_returns.index)
-strategy_cum = (1 + strategy_return.fillna(0)).cumprod()
+strategy_returns = pd.Series(strategy_returns, index=monthly_returns.index)
+strategy_cum = (1 + strategy_returns).cumprod()
+
+# 벤치마크 (KOSPI 대용 SPY)
+benchmark = load_price("SPY")["Close"].resample("M").last().pct_change()
+benchmark = benchmark.loc[strategy_cum.index]
+benchmark_cum = (1 + benchmark).cumprod()
 
 fig3, ax3 = plt.subplots()
-ax3.plot(strategy_cum.index, strategy_cum, linewidth=2)
-ax3.set_title("월별 섹터 로테이션 누적 수익")
+ax3.plot(strategy_cum.index, strategy_cum, label="Sector Rotation")
+ax3.plot(benchmark_cum.index, benchmark_cum, label="Benchmark")
+ax3.legend()
+ax3.set_title("누적 수익률 비교")
+
 st.pyplot(fig3)
 
-st.success("✅ 최종 안정판 실행 완료 (분석 → 확인 → 검증)")
+st.success("✅ 최종 버전 실행 완료")
