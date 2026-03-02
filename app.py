@@ -27,7 +27,7 @@ def load_price(ticker):
     return df[["Close"]].dropna()
 
 # =========================
-# 안전한 수익률 계산 (핵심 수정)
+# 안전 수익률
 # =========================
 def safe_return(series, period):
     try:
@@ -45,39 +45,43 @@ def momentum_score(df):
     if df is None or len(df) < 130:
         return 0
 
-    r1 = safe_return(df["Close"], 21)
-    r3 = safe_return(df["Close"], 63)
-    r6 = safe_return(df["Close"], 126)
+    returns = [
+        safe_return(df["Close"], 21),
+        safe_return(df["Close"], 63),
+        safe_return(df["Close"], 126),
+    ]
 
-    score = 0
-    for r in [r1, r3, r6]:
-        if r > 0:
-            score += 1
-    return score
+    return sum(1 for r in returns if r > 0)
 
 # =========================
-# 백테스트
+# 백테스트 (완전 재작성)
 # =========================
 def rotation_backtest(price_dict):
-    monthly = {}
+    close_df = pd.DataFrame()
+
     for sector, df in price_dict.items():
-        if df is not None:
-            monthly[sector] = df["Close"].resample("M").last()
+        if df is not None and len(df) > 130:
+            close_df[sector] = df["Close"]
 
-    monthly_df = pd.DataFrame(monthly).dropna()
-    returns = monthly_df.pct_change().dropna()
+    if close_df.empty:
+        return None
 
-    strategy = []
-    for date in returns.index:
-        best = returns.loc[date].idxmax()
-        strategy.append(returns.loc[date, best])
+    monthly_price = close_df.resample("M").last()
+    monthly_return = monthly_price.pct_change().dropna()
 
-    return (1 + pd.Series(strategy, index=returns.index)).cumprod()
+    strategy_returns = []
+
+    for date in monthly_return.index:
+        best_sector = monthly_return.loc[date].idxmax()
+        strategy_returns.append(monthly_return.loc[date, best_sector])
+
+    strategy_series = pd.Series(strategy_returns, index=monthly_return.index)
+    return (1 + strategy_series).cumprod()
 
 # =========================
 # UI
 # =========================
-st.title("📊 Sector Rotation Dashboard (FINAL STABLE)")
+st.title("📊 Sector Rotation Dashboard (FINAL STABLE VERSION)")
 
 prices = {}
 scores = {}
@@ -121,9 +125,12 @@ st.header("③ 월별 섹터 로테이션 백테스트")
 
 bt = rotation_backtest(prices)
 
-fig3, ax3 = plt.subplots()
-ax3.plot(bt.index, bt.values)
-ax3.set_title("Sector Rotation Strategy (Cumulative)")
-st.pyplot(fig3)
+if bt is not None:
+    fig3, ax3 = plt.subplots()
+    ax3.plot(bt.index, bt.values)
+    ax3.set_title("Sector Rotation Strategy (Cumulative)")
+    st.pyplot(fig3)
+else:
+    st.warning("백테스트 데이터 부족")
 
-st.caption("※ 매월 가장 강한 섹터 1개에 투자하는 단순 전략")
+st.caption("※ 매월 가장 수익률이 높은 섹터 1개에 투자하는 전략")
